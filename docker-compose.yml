@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  openlist-autofile:
+    image: liheng6668/openlist-autofile:latest
+    container_name: openlist-autofile
+    restart: unless-stopped
+    ports:
+      - "8081:8000"
+    volumes:
+      - ./config:/config
+      # 如果你以后还是想本地浏览路径，可以在这里挂载，否则现在不再强制要求
+      # - /your/nas/path:/data:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - TOOL_PASSWORD=admin888  # 工具自身的登录密码，建议修改

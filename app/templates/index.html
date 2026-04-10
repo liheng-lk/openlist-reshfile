@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenList 索引助手 Pro</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;500;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        .task-status-badge {
+            font-size: 0.7rem; padding: 2px 8px; border-radius: 20px;
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
+            display: inline-flex; align-items: center; gap: 4px;
+        }
+        .status-scanning { color: #60a5fa; border-color: #60a5fa; }
+        .status-syncing { color: #facc15; border-color: #facc15; }
+        .status-done { color: #4ade80; border-color: #4ade80; }
+        .status-error { color: #f87171; border-color: #f87171; }
+        
+        .floating-settings {
+            position: fixed; bottom: 2rem; right: 2rem;
+            width: 50px; height: 50px; border-radius: 50%;
+            background: var(--primary); color: white;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 100;
+        }
+        .floating-settings:hover { transform: rotate(90deg) scale(1.1); }
+        
+        #login-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at top right, #1e1b4b, #0f172a);
+            z-index: 2000; display: flex; align-items: center; justify-content: center;
+        }
+
+        .task-detail {
+            font-size: 0.8rem; color: var(--text-muted); margin-top: 8px;
+            background: rgba(0,0,0,0.2); padding: 8px; border-radius: 8px;
+        }
+        
+        .loading-spin { animation: spin 1s linear infinite; }
+        @keyframes spin { from {transform: rotate(0deg);} to {transform: rotate(360deg);} }
+    </style>
+</head>
+<body>
+    <div id="login-overlay">
+        <div class="glass-card" style="width: 350px; padding: 3rem 2rem; text-align: center;">
+            <div style="font-size: 3rem; margin-bottom: 1rem; color: var(--primary)"><i class="fas fa-shield-halved"></i></div>
+            <h2 style="margin-bottom: 2rem; font-weight: 300;">安全验证</h2>
+            <input type="password" id="tool_pass" placeholder="管理密码" style="text-align: center; font-size: 1.2rem; letter-spacing: 4px;">
+            <button class="btn btn-primary" style="width: 100%; margin-top: 1.5rem;" onclick="doLogin()">解除锁定</button>
+            <p id="login-err" style="color: var(--error); margin-top: 1rem; opacity: 0; transition: 0.3s">密码无效</p>
+        </div>
+    </div>
+
+    <div class="container">
+        <header style="margin-bottom: 3rem">
+            <h1>OpenList Indexer <span style="font-weight: 300; opacity: 0.6">PRO</span></h1>
+            <p style="color: var(--text-muted)">高效 · 可视化 · 增量扫描</p>
+        </header>
+
+        <section class="glass-card">
+            <div class="section-title"><i class="fas fa-satellite-dish"></i> 核心连接配置</div>
+            <div class="config-grid">
+                <div class="form-group">
+                    <label>OpenList API 端点</label>
+                    <input type="text" id="server_url" placeholder="https://fox.oplist.org">
+                </div>
+                <div class="form-group">
+                    <label>管理员账号</label>
+                    <input type="text" id="username" placeholder="admin">
+                </div>
+                <div class="form-group">
+                    <label>管理员密码</label>
+                    <input type="password" id="password" placeholder="密钥">
+                </div>
+                <div style="display: flex; align-items: flex-end; padding-bottom: 1.25rem;">
+                    <button class="btn btn-primary" onclick="saveConfig()"><i class="fas fa-save"></i> 存储凭据</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="glass-card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+                <div class="section-title" style="margin-bottom: 0;"><i class="fas fa-list-check"></i> 索引同步任务</div>
+                <button class="btn btn-outline" onclick="showTaskModal()"><i class="fas fa-plus-circle"></i> 定制新任务</button>
+            </div>
+            <div id="tasks-list"></div>
+        </section>
+
+        <section class="glass-card">
+            <div class="section-title"><i class="fas fa-terminal"></i> 全局事件流</div>
+            <div class="log-container" id="logs"></div>
+        </section>
+    </div>
+
+    <!-- 悬浮设置按钮 -->
+    <div class="floating-settings" onclick="showSettingsModal()" title="设置"><i class="fas fa-user-gear"></i></div>
+
+    <!-- 模态框组 (保持逻辑，优化样式) -->
+    <div class="modal" id="task-modal">
+        <div class="glass-card modal-content">
+            <h3 id="task-modal-title">新增索引任务</h3>
+            <div class="form-group" style="margin-top: 1.5rem">
+                <label>任务描述</label>
+                <input type="text" id="task_name" placeholder="电影增量更新">
+            </div>
+            <div class="form-group">
+                <label>同步路径</label>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" id="task_mount_path" placeholder="/自动同步/目录">
+                    <button class="btn btn-outline" onclick="openRemoteBrowser()"><i class="fas fa-search"></i> 浏览</button>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>定时周期 (Cron)</label>
+                <input type="text" id="task_cron" value="0 * * * *">
+            </div>
+            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                <button class="btn btn-primary" id="save-task-btn" onclick="saveTask()">确认添加</button>
+                <button class="btn btn-outline" onclick="hideTaskModal()">放弃</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置模态框 -->
+    <div class="modal" id="settings-modal">
+        <div class="glass-card modal-content" style="max-width: 400px">
+            <h3>系统安全设置</h3>
+            <div class="form-group" style="margin-top: 1.5rem">
+                <label>修改管理密码</label>
+                <input type="password" id="new_pass_val" placeholder="输入新密码">
+            </div>
+            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                <button class="btn btn-primary" onclick="changePass()">更新密码</button>
+                <button class="btn btn-outline" onclick="hideSettingsModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 远程浏览 (保持原有逻辑) -->
+    <div class="modal" id="browser-modal">
+        <div class="glass-card modal-content" style="max-width: 500px">
+            <div class="section-title">选择 OpenList 文件夹</div>
+            <div id="current-path" style="margin-bottom: 1rem; font-family: 'JetBrains Mono'; font-size: 0.8rem; color: var(--primary)"></div>
+            <div id="browser-items" style="max-height: 400px; overflow-y: auto;"></div>
+            <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+                <button class="btn btn-primary" onclick="confirmRemotePath()">确认选中</button>
+                <button class="btn btn-outline" onclick="hideRemoteBrowser()">返回</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let config = { tasks: [] };
+        let taskStatuses = {};
+        let currentRemotePath = "/";
+        let editingTaskIdx = -1;
+
+        async function doLogin() {
+            const pass = document.getElementById('tool_pass').value;
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({password: pass})
+            });
+            if (res.ok) {
+                document.getElementById('login-overlay').style.display = 'none';
+                initApp();
+            } else {
+                document.getElementById('login-err').style.opacity = 1;
+            }
+        }
+
+        async function changePass() {
+            const newPass = document.getElementById('new_pass_val').value;
+            const res = await fetch('/api/change-password', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({new_password: newPass})
+            });
+            if (res.ok) { alert('密码修改成功，新密码即刻生效！'); hideSettingsModal(); }
+            else { alert('修改失败：密码长度需至少6位'); }
+        }
+
+        async function initApp() {
+            await fetchConfig();
+            fetchLogs();
+            setInterval(fetchLogs, 5000);
+            setInterval(updateTaskStatuses, 2000);
+        }
+
+        async function fetchConfig() {
+            const res = await fetch('/api/config');
+            if (res.status === 401) return;
+            config = await res.json();
+            document.getElementById('server_url').value = config.server_url;
+            document.getElementById('username').value = config.username;
+            document.getElementById('password').value = config.password;
+            renderTasks();
+        }
+
+        async function updateTaskStatuses() {
+            const res = await fetch('/api/task-status');
+            taskStatuses = await res.json();
+            renderTasks();
+        }
+
+        function renderTasks() {
+            const list = document.getElementById('tasks-list');
+            if (config.tasks.length === 0) {
+                list.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 2rem;">空空如也，快去添加新同步任务吧</div>';
+                return;
+            }
+            list.innerHTML = config.tasks.map((t, idx) => {
+                const status = taskStatuses[t.name] || {state: 'idle', message: '就绪'};
+                let statusClass = '';
+                let icon = '<i class="fas fa-circle-play"></i>';
+                
+                if (status.state === 'scanning') { statusClass = 'status-scanning'; icon = '<i class="fas fa-spinner loading-spin"></i>'; }
+                else if (status.state === 'syncing') { statusClass = 'status-syncing'; icon = '<i class="fas fa-sync loading-spin"></i>'; }
+                else if (status.state === 'done') { statusClass = 'status-done'; icon = '<i class="fas fa-check-double"></i>'; }
+                else if (status.state === 'error') { statusClass = 'status-error'; icon = '<i class="fas fa-triangle-exclamation"></i>'; }
+
+                return `
+                <div class="task-item" style="flex-direction: column; align-items: flex-start;">
+                    <div style="display: flex; justify-content: space-between; width: 100%; align-items: center;">
+                        <div class="task-info">
+                            <h4 style="display: flex; align-items: center; gap: 10px;">
+                                ${t.name}
+                                <span class="task-status-badge ${statusClass}">${icon} ${status.message}</span>
+                            </h4>
+                            <p style="margin-top: 5px; opacity: 0.6"><i class="fas fa-link"></i> ${t.mount_path}</p>
+                        </div>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-outline" onclick="runNow('${t.name}')" title="立即同步"><i class="fas fa-bolt"></i></button>
+                            <button class="btn btn-outline" onclick="editTask(${idx})" title="编辑任务"><i class="fas fa-pen"></i></button>
+                            <button class="btn btn-outline" style="color: var(--error)" onclick="deleteTask(${idx})" title="删除任务"><i class="fas fa-trash-can"></i></button>
+                        </div>
+                    </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        // --- 逻辑简化函数 (保持原有功能) ---
+        async function saveConfig(quiet=false) {
+            config.server_url = document.getElementById('server_url').value;
+            config.username = document.getElementById('username').value;
+            config.password = document.getElementById('password').value;
+            await fetch('/api/config', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(config) });
+            if(!quiet) alert('配置已安全存储');
+        }
+        function showTaskModal() { 
+            editingTaskIdx = -1;
+            document.getElementById('task-modal-title').innerText = '新增索引任务';
+            document.getElementById('save-task-btn').innerText = '确认添加';
+            document.getElementById('task_name').value = '';
+            document.getElementById('task_mount_path').value = '';
+            document.getElementById('task_cron').value = '0 * * * *';
+            document.getElementById('task-modal').classList.add('active'); 
+        }
+        function hideTaskModal() { document.getElementById('task-modal').classList.remove('active'); }
+        function editTask(idx) {
+            editingTaskIdx = idx;
+            const t = config.tasks[idx];
+            document.getElementById('task-modal-title').innerText = '编辑同步任务';
+            document.getElementById('save-task-btn').innerText = '保存修改';
+            document.getElementById('task_name').value = t.name;
+            document.getElementById('task_mount_path').value = t.mount_path;
+            document.getElementById('task_cron').value = t.cron;
+            document.getElementById('task-modal').classList.add('active');
+        }
+        function showSettingsModal() { document.getElementById('settings-modal').classList.add('active'); }
+        function hideSettingsModal() { document.getElementById('settings-modal').classList.remove('active'); }
+        async function saveTask() {
+            const newTask = { name: document.getElementById('task_name').value, mount_path: document.getElementById('task_mount_path').value, cron: document.getElementById('task_cron').value, enabled: true };
+            if (editingTaskIdx !== -1) {
+                config.tasks[editingTaskIdx] = newTask;
+            } else {
+                config.tasks.push(newTask); 
+            }
+            await saveConfig(true); hideTaskModal(); renderTasks();
+        }
+        async function deleteTask(idx) { 
+            if (confirm('确定永久删除此自动索引任务吗？')) { 
+                config.tasks.splice(idx, 1); 
+                await saveConfig(true); 
+                renderTasks(); 
+            } 
+        }
+        async function runNow(name) { await fetch(`/api/run-now?task_name=${encodeURIComponent(name)}`, {method: 'POST'}); }
+        async function openRemoteBrowser() { document.getElementById('browser-modal').classList.add('active'); browseRemotePath(currentRemotePath); }
+        function hideRemoteBrowser() { document.getElementById('browser-modal').classList.remove('active'); }
+        async function browseRemotePath(path) {
+            const res = await fetch(`/api/openlist/browse?path=${encodeURIComponent(path)}`);
+            const data = await res.json();
+            if (data.error) { document.getElementById('browser-items').innerHTML = `<p style="color:var(--error);padding:1rem">${data.error}</p>`; return; }
+            currentRemotePath = data.current_path; document.getElementById('current-path').innerText = currentRemotePath;
+            let html = path !== "/" ? `<div class="browser-item" onclick="browseRemotePath('${path.substring(0, path.lastIndexOf('/')) || '/'}')"><i class="fas fa-circle-arrow-up"></i> .. [上一级]</div>` : "";
+            html += data.items.map(item => `<div class="browser-item" onclick="browseRemotePath('${item.path}')"><i class="fas fa-folder"></i> ${item.name}</div>`).join('');
+            document.getElementById('browser-items').innerHTML = html || "<p style='padding:1rem'>无子文件夹</p>";
+        }
+        function confirmRemotePath() { document.getElementById('task_mount_path').value = currentRemotePath; hideRemoteBrowser(); }
+        async function fetchLogs() {
+            const res = await fetch('/api/logs'); if (!res.ok) return;
+            const data = await res.json(); const logEl = document.getElementById('logs');
+            logEl.innerHTML = data.logs.map(log => `<div class="log-entry">${log}</div>`).join('');
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        document.getElementById('tool_pass').addEventListener('keypress', (e) => { if (e.key === 'Enter') doLogin(); });
+    </script>
+</body>
+</html>
