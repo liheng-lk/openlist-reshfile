@@ -9,8 +9,8 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 from contextlib import asynccontextmanager
-from .manager import manager
-from .scheduler import scheduler, reload_jobs, run_index_update
+from .manager import format_exception, manager
+from .scheduler import scheduler, reload_jobs, run_index_update, set_task_status_store
 from .crawler import recursive_scan_and_refresh
 from .incremental import remote_incremental_scan_and_refresh
 from .watcher import IncrementalSyncWatcher
@@ -20,6 +20,7 @@ incremental_watcher = IncrementalSyncWatcher(manager)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    set_task_status_store(task_status)
     reload_jobs()
     scheduler.start()
     incremental_watcher.start(task_status)
@@ -187,15 +188,21 @@ async def run_now(task_name: str, force_full: bool = False, auth=Depends(verify_
                     await client.post(f"{server_url}/api/admin/index/update", params={"path": task['mount_path']}, headers={"Authorization": token})
                 
                 if task.get("incremental_enabled", True):
-                    task_status[task_name] = {"state": "done", "message": f"增量同步完毕，扫描文件 {total_files} 个"}
-                    manager.add_log(task_name, f"✅ 增量同步完毕，OpenList 索引已对齐！本轮扫描文件: {total_files}")
+                    existing_status = task_status.get(task_name, {})
+                    task_status[task_name] = {
+                        **existing_status,
+                        "state": "done",
+                        "message": f"增量同步完毕，当前已知文件 {total_files} 个",
+                    }
+                    manager.add_log(task_name, f"✅ 增量同步完毕，OpenList 索引已对齐！当前已知文件: {total_files}")
                 else:
                     task_status[task_name] = {"state": "done", "message": f"递归完毕，共刷新记录 {total_files} 个文件"}
                     manager.add_log(task_name, f"✅ 目录强制更新完毕，且已触发原生引擎缓存对齐！总遍历文件: {total_files}")
                 
         except Exception as e:
-            task_status[task_name] = {"state": "error", "message": f"异常: {str(e)}"}
-            manager.add_log(task_name, f"执行器内部异常: {str(e)}")
+            error_detail = format_exception(e)
+            task_status[task_name] = {"state": "error", "message": f"异常: {error_detail}"}
+            manager.add_log(task_name, f"执行器内部异常: {error_detail}")
     
     asyncio.create_task(execute_task())
     return {"status": "started"}

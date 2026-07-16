@@ -14,6 +14,13 @@ LOG_DIR = os.path.join(base_dir, "logs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
+
+def format_exception(exc):
+    message = str(exc).strip()
+    if message:
+        return f"{type(exc).__name__}: {message}"
+    return type(exc).__name__
+
 class ConfigManager:
     def __init__(self):
         self.ensure_config()

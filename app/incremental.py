@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import os
@@ -11,6 +12,8 @@ from .manager import base_dir
 STATE_DIR = os.path.join(base_dir, "state")
 STATE_PATH = os.path.join(STATE_DIR, "remote_snapshots.json")
 MAX_INDEX_PATHS = 80
+_state_lock = asyncio.Lock()
+_task_locks: Dict[str, asyncio.Lock] = {}
 
 
 def _ensure_state_dir():
@@ -48,8 +51,37 @@ async def remote_incremental_scan_and_refresh(
     task_name = task["name"]
     root_path = _normalize_remote_path(task["mount_path"])
     state_key = _task_state_key(task_name, root_path)
-    state = _load_state()
-    task_state = state.setdefault("tasks", {}).get(state_key, {})
+    task_lock = _get_task_lock(state_key)
+    async with task_lock:
+        return await _remote_incremental_scan_and_refresh_locked(
+            client,
+            server_url,
+            token,
+            task,
+            manager,
+            task_status,
+            force_full,
+            task_name,
+            root_path,
+            state_key,
+        )
+
+
+async def _remote_incremental_scan_and_refresh_locked(
+    client,
+    server_url: str,
+    token: str,
+    task: dict,
+    manager,
+    task_status,
+    force_full: bool,
+    task_name: str,
+    root_path: str,
+    state_key: str,
+):
+    async with _state_lock:
+        state = _load_state()
+        task_state = state.setdefault("tasks", {}).get(state_key, {})
     old_dirs = task_state.get("directories") or {}
     has_baseline = bool(old_dirs)
     full_scan = force_full or not has_baseline
@@ -60,7 +92,7 @@ async def remote_incremental_scan_and_refresh(
     visited = {root_path}
     scanned_dirs = 0
     skipped_dirs = 0
-    total_files = 0
+    scanned_files = 0
     changed_paths: Set[str] = set()
     scanned_nodes: Dict[str, dict] = {}
     removed_subtrees: Set[str] = set()
@@ -93,7 +125,7 @@ async def remote_incremental_scan_and_refresh(
         path = queue.popleft()
         node = await _fetch_dir_node(client, server_url, token, path)
         scanned_dirs += 1
-        total_files += node["file_count"]
+        scanned_files += node["file_count"]
         scanned_nodes[path] = node
 
         old_node = old_dirs.get(path)
@@ -117,17 +149,25 @@ async def remote_incremental_scan_and_refresh(
         if task_status is not None:
             task_status[task_name] = {
                 "state": "syncing",
-                "message": f"已扫描 {scanned_dirs} 个目录，跳过 {skipped_dirs} 个未变子树",
+                "message": f"已扫描 {scanned_dirs} 个目录，文件 {scanned_files} 个，跳过 {skipped_dirs} 个未变子树",
+                "scanned_dirs": scanned_dirs,
+                "scanned_files": scanned_files,
+                "skipped_dirs": skipped_dirs,
+                "changed_dirs": len(changed_paths),
             }
 
     merged_dirs = _merge_directory_state(old_dirs, scanned_nodes, removed_subtrees)
-    state["tasks"][state_key] = {
-        "task_name": task_name,
-        "root_path": root_path,
-        "deep_cursor": 0 if full_scan else deep_cursor,
-        "directories": merged_dirs,
-    }
-    _save_state(state)
+    known_files = _count_known_files(merged_dirs)
+    known_dirs = len(merged_dirs)
+    async with _state_lock:
+        latest_state = _load_state()
+        latest_state.setdefault("tasks", {})[state_key] = {
+            "task_name": task_name,
+            "root_path": root_path,
+            "deep_cursor": 0 if full_scan else deep_cursor,
+            "directories": merged_dirs,
+        }
+        _save_state(latest_state)
 
     index_paths = [root_path] if full_scan else _collapse_index_paths(root_path, changed_paths)
     refreshed = await _refresh_indexes(client, server_url, token, index_paths, manager, task_name)
@@ -135,21 +175,28 @@ async def remote_incremental_scan_and_refresh(
     if task_status is not None:
         task_status[task_name] = {
             "state": "done",
-            "message": f"增量完成，扫描 {scanned_dirs} 个目录，刷新 {refreshed} 个索引",
+            "message": f"增量完成，文件 {known_files} 个，扫描 {scanned_dirs} 个目录，刷新 {refreshed} 个索引",
+            "files": known_files,
+            "known_dirs": known_dirs,
+            "scanned_dirs": scanned_dirs,
+            "scanned_files": scanned_files,
+            "skipped_dirs": skipped_dirs,
+            "changed_dirs": len(changed_paths),
+            "refreshed": refreshed,
         }
 
     if full_scan:
         manager.add_log(
             task_name,
-            f"远端基线扫描完成：扫描 {scanned_dirs} 个目录，发现 {total_files} 个文件，已刷新根索引",
+            f"远端基线扫描完成：扫描 {scanned_dirs} 个目录，发现 {known_files} 个文件，已刷新根索引",
         )
     else:
         manager.add_log(
             task_name,
-            f"远端增量巡检完成：扫描 {scanned_dirs} 个目录，跳过 {skipped_dirs} 个未变子树，刷新 {refreshed} 个目录",
+            f"远端增量巡检完成：已知 {known_files} 个文件，扫描 {scanned_dirs} 个目录，变化 {len(changed_paths)} 个目录，跳过 {skipped_dirs} 个未变子树，刷新 {refreshed} 个目录",
         )
 
-    return total_files, scanned_dirs
+    return known_files, scanned_dirs
 
 
 async def _fetch_dir_node(client, server_url: str, token: str, path: str) -> dict:
@@ -269,6 +316,18 @@ def _collapse_index_paths(root_path: str, changed_paths: Set[str]) -> List[str]:
             continue
         collapsed.append(path)
     return collapsed
+
+
+def _get_task_lock(state_key: str) -> asyncio.Lock:
+    lock = _task_locks.get(state_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _task_locks[state_key] = lock
+    return lock
+
+
+def _count_known_files(directories: Dict[str, dict]) -> int:
+    return sum(int(node.get("file_count") or 0) for node in directories.values())
 
 
 def _next_deep_check_paths(
