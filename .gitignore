@@ -12,6 +12,7 @@ ENV/
 # Configuration and Logs (Sensitive and Dynamic)
 config/config.json
 config/logs/
+config/state/
 logs/
 
 # IDE files

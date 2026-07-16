@@ -35,6 +35,13 @@ class ConfigManager:
             # 兼容旧版本
             if "tool_password" not in data:
                 data["tool_password"] = os.getenv("TOOL_PASSWORD", "admin888")
+            for task in data.get("tasks", []):
+                task.setdefault("incremental_enabled", True)
+                task.setdefault("watch_enabled", False)
+                task.setdefault("local_watch_path", "")
+                task.setdefault("watch_mode", "polling")
+                task.setdefault("debounce_seconds", 5)
+                task.setdefault("deep_check_limit", 200)
             return data
 
     def save_config(self, config):

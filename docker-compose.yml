@@ -9,8 +9,8 @@ services:
       - "8081:8000"
     volumes:
       - ./config:/config
-      # 如果你以后还是想本地浏览路径，可以在这里挂载，否则现在不再强制要求
-      # - /your/nas/path:/data:ro
+      # 可选：如果要启用容器可见路径/WebDAV 监听，需要把同一个挂载目录暴露给本容器
+      # - /your/webdav/strm:/watch/strm:ro
     environment:
       - TZ=Asia/Shanghai
       - TOOL_PASSWORD=admin888  # 工具自身的登录密码，建议修改

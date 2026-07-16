@@ -17,6 +17,29 @@
         .status-syncing { color: #facc15; border-color: #facc15; }
         .status-done { color: #4ade80; border-color: #4ade80; }
         .status-error { color: #f87171; border-color: #f87171; }
+        .status-watching { color: #22d3ee; border-color: #22d3ee; }
+
+        .check-row {
+            display: flex; align-items: center; gap: 0.75rem;
+            color: var(--text-main); cursor: pointer;
+        }
+        .check-row input { width: auto; }
+        .mini-grid {
+            display: grid; grid-template-columns: 1fr 150px 110px; gap: 0.75rem;
+        }
+        select {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--card-border);
+            border-radius: 0.75rem;
+            padding: 0.75rem 1rem;
+            color: white;
+            font-size: 1rem;
+            outline: none;
+        }
+        @media (max-width: 720px) {
+            .mini-grid { grid-template-columns: 1fr; }
+        }
         
         .floating-settings {
             position: fixed; bottom: 2rem; right: 2rem;
@@ -113,6 +136,39 @@
                     <input type="text" id="task_mount_path" placeholder="/自动同步/目录">
                     <button class="btn btn-outline" onclick="openRemoteBrowser()"><i class="fas fa-search"></i> 浏览</button>
                 </div>
+            </div>
+            <div class="form-group">
+                <label class="check-row">
+                    <input type="checkbox" id="task_incremental_enabled" checked>
+                    <span>远端快照增量</span>
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="check-row">
+                    <input type="checkbox" id="task_watch_enabled">
+                    <span>监听容器可见路径/WebDAV 挂载</span>
+                </label>
+            </div>
+            <div class="mini-grid">
+                <div class="form-group">
+                    <label>容器内可见路径</label>
+                    <input type="text" id="task_local_watch_path" placeholder="/watch/strm">
+                </div>
+                <div class="form-group">
+                    <label>监听模式</label>
+                    <select id="task_watch_mode">
+                        <option value="polling">polling</option>
+                        <option value="native">native</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>去抖秒数</label>
+                    <input type="number" min="1" max="300" id="task_debounce_seconds" value="5">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>每轮深巡目录数</label>
+                <input type="number" min="0" max="5000" id="task_deep_check_limit" value="200">
             </div>
             <div class="form-group">
                 <label>定时周期 (Cron)</label>
@@ -223,6 +279,10 @@
                 else if (status.state === 'syncing') { statusClass = 'status-syncing'; icon = '<i class="fas fa-sync loading-spin"></i>'; }
                 else if (status.state === 'done') { statusClass = 'status-done'; icon = '<i class="fas fa-check-double"></i>'; }
                 else if (status.state === 'error') { statusClass = 'status-error'; icon = '<i class="fas fa-triangle-exclamation"></i>'; }
+                else if (status.state === 'watching') { statusClass = 'status-watching'; icon = '<i class="fas fa-tower-broadcast"></i>'; }
+
+                const syncMode = t.incremental_enabled !== false ? '远端快照增量' : '全量递归扫描';
+                const watchInfo = t.watch_enabled ? `<p style="margin-top: 5px; opacity: 0.6"><i class="fas fa-folder-tree"></i> ${t.local_watch_path || '未设置容器内路径'} · ${t.watch_mode || 'polling'}</p>` : '';
 
                 return `
                 <div class="task-item" style="flex-direction: column; align-items: flex-start;">
@@ -233,9 +293,12 @@
                                 <span class="task-status-badge ${statusClass}">${icon} ${status.message}</span>
                             </h4>
                             <p style="margin-top: 5px; opacity: 0.6"><i class="fas fa-link"></i> ${t.mount_path}</p>
+                            <p style="margin-top: 5px; opacity: 0.6"><i class="fas fa-layer-group"></i> ${syncMode}</p>
+                            ${watchInfo}
                         </div>
                         <div style="display: flex; gap: 10px;">
                             <button class="btn btn-outline" onclick="runNow('${t.name}')" title="立即同步"><i class="fas fa-bolt"></i></button>
+                            <button class="btn btn-outline" onclick="runNow('${t.name}', true)" title="重建基线"><i class="fas fa-arrows-rotate"></i></button>
                             <button class="btn btn-outline" onclick="editTask(${idx})" title="编辑任务"><i class="fas fa-pen"></i></button>
                             <button class="btn btn-outline" style="color: var(--error)" onclick="deleteTask(${idx})" title="删除任务"><i class="fas fa-trash-can"></i></button>
                         </div>
@@ -260,6 +323,12 @@
             document.getElementById('task_name').value = '';
             document.getElementById('task_mount_path').value = '';
             document.getElementById('task_cron').value = '0 * * * *';
+            document.getElementById('task_incremental_enabled').checked = true;
+            document.getElementById('task_watch_enabled').checked = false;
+            document.getElementById('task_local_watch_path').value = '';
+            document.getElementById('task_watch_mode').value = 'polling';
+            document.getElementById('task_debounce_seconds').value = 5;
+            document.getElementById('task_deep_check_limit').value = 200;
             document.getElementById('task-modal').classList.add('active'); 
         }
         function hideTaskModal() { document.getElementById('task-modal').classList.remove('active'); }
@@ -271,12 +340,29 @@
             document.getElementById('task_name').value = t.name;
             document.getElementById('task_mount_path').value = t.mount_path;
             document.getElementById('task_cron').value = t.cron;
+            document.getElementById('task_incremental_enabled').checked = t.incremental_enabled !== false;
+            document.getElementById('task_watch_enabled').checked = !!t.watch_enabled;
+            document.getElementById('task_local_watch_path').value = t.local_watch_path || '';
+            document.getElementById('task_watch_mode').value = t.watch_mode || 'polling';
+            document.getElementById('task_debounce_seconds').value = t.debounce_seconds || 5;
+            document.getElementById('task_deep_check_limit').value = t.deep_check_limit || 200;
             document.getElementById('task-modal').classList.add('active');
         }
         function showSettingsModal() { document.getElementById('settings-modal').classList.add('active'); }
         function hideSettingsModal() { document.getElementById('settings-modal').classList.remove('active'); }
         async function saveTask() {
-            const newTask = { name: document.getElementById('task_name').value, mount_path: document.getElementById('task_mount_path').value, cron: document.getElementById('task_cron').value, enabled: true };
+            const newTask = {
+                name: document.getElementById('task_name').value,
+                mount_path: document.getElementById('task_mount_path').value,
+                cron: document.getElementById('task_cron').value,
+                enabled: true,
+                incremental_enabled: document.getElementById('task_incremental_enabled').checked,
+                watch_enabled: document.getElementById('task_watch_enabled').checked,
+                local_watch_path: document.getElementById('task_local_watch_path').value,
+                watch_mode: document.getElementById('task_watch_mode').value,
+                debounce_seconds: Number(document.getElementById('task_debounce_seconds').value || 5),
+                deep_check_limit: Number(document.getElementById('task_deep_check_limit').value || 200)
+            };
             if (editingTaskIdx !== -1) {
                 config.tasks[editingTaskIdx] = newTask;
             } else {
@@ -291,7 +377,7 @@
                 renderTasks(); 
             } 
         }
-        async function runNow(name) { await fetch(`/api/run-now?task_name=${encodeURIComponent(name)}`, {method: 'POST'}); }
+        async function runNow(name, forceFull=false) { await fetch(`/api/run-now?task_name=${encodeURIComponent(name)}&force_full=${forceFull}`, {method: 'POST'}); }
         async function openRemoteBrowser() { document.getElementById('browser-modal').classList.add('active'); browseRemotePath(currentRemotePath); }
         function hideRemoteBrowser() { document.getElementById('browser-modal').classList.remove('active'); }
         async function browseRemotePath(path) {

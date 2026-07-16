@@ -12,14 +12,19 @@ from contextlib import asynccontextmanager
 from .manager import manager
 from .scheduler import scheduler, reload_jobs, run_index_update
 from .crawler import recursive_scan_and_refresh
+from .incremental import remote_incremental_scan_and_refresh
+from .watcher import IncrementalSyncWatcher
 
 task_status: Dict[str, dict] = {}
+incremental_watcher = IncrementalSyncWatcher(manager)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     reload_jobs()
     scheduler.start()
+    incremental_watcher.start(task_status)
     yield
+    await incremental_watcher.stop()
     scheduler.shutdown()
 
 class AccessLogFilter(logging.Filter):
@@ -38,6 +43,12 @@ class TaskSchema(BaseModel):
     mount_path: str
     cron: str
     enabled: bool = True
+    incremental_enabled: bool = True
+    watch_enabled: bool = False
+    local_watch_path: Optional[str] = ""
+    watch_mode: str = "polling"
+    debounce_seconds: int = 5
+    deep_check_limit: int = 200
 
 class ConfigSchema(BaseModel):
     server_url: str
@@ -86,10 +97,11 @@ async def get_config(auth=Depends(verify_token)): return manager.get_config()
 @app.post("/api/config")
 async def save_config(config: ConfigSchema, auth=Depends(verify_token)):
     old_config = manager.get_config()
-    config_dict = config.dict()
+    config_dict = config.model_dump()
     config_dict["tool_password"] = old_config.get("tool_password")
     manager.save_config(config_dict)
     reload_jobs()
+    incremental_watcher.reload_config()
     return {"status": "ok"}
 
 @app.get("/api/openlist/browse")
@@ -133,7 +145,7 @@ async def get_logs(auth=Depends(verify_token)): return {"logs": manager.get_logs
 async def get_task_status(auth=Depends(verify_token)): return task_status
 
 @app.post("/api/run-now")
-async def run_now(task_name: str, auth=Depends(verify_token)):
+async def run_now(task_name: str, force_full: bool = False, auth=Depends(verify_token)):
     config = manager.get_config()
     task = next((t for t in config.get("tasks", []) if t['name'] == task_name), None)
     if not task: raise HTTPException(status_code=404)
@@ -150,18 +162,36 @@ async def run_now(task_name: str, auth=Depends(verify_token)):
                     task_status[task_name] = {"state": "error", "message": "OpenList 登录失效"}
                     manager.add_log(task_name, "登录 OpenList 失败，请检查配置账号密码")
                     return
-                manager.add_log(task_name, "登录成功，已切回「文件列表可见」模式，启动深度递归爬取引擎！")
+                if task.get("incremental_enabled", True):
+                    manager.add_log(task_name, "登录成功，启动远端快照增量引擎！")
+                else:
+                    manager.add_log(task_name, "登录成功，已切回「文件列表可见」模式，启动深度递归爬取引擎！")
 
-                # 启动递归扫描爬虫
-                total_files, total_dirs = await recursive_scan_and_refresh(
-                    client, server_url, token, task['mount_path'], manager, task_name, task_status
-                )
+                if task.get("incremental_enabled", True):
+                    total_files, total_dirs = await remote_incremental_scan_and_refresh(
+                        client,
+                        server_url,
+                        token,
+                        task,
+                        manager,
+                        task_status,
+                        force_full=force_full,
+                    )
+                else:
+                    # 启动递归扫描爬虫
+                    total_files, total_dirs = await recursive_scan_and_refresh(
+                        client, server_url, token, task['mount_path'], manager, task_name, task_status
+                    )
+
+                    # 追加执行原生数据库增量构建（确保 Bleve 引擎更新）
+                    await client.post(f"{server_url}/api/admin/index/update", params={"path": task['mount_path']}, headers={"Authorization": token})
                 
-                # 追加执行原生数据库增量构建（确保 Bleve 引擎更新）
-                await client.post(f"{server_url}/api/admin/index/update", params={"path": task['mount_path']}, headers={"Authorization": token})
-                
-                task_status[task_name] = {"state": "done", "message": f"递归完毕，共刷新记录 {total_files} 个文件"}
-                manager.add_log(task_name, f"✅ 目录强制更新完毕，且已触发原生引擎缓存对齐！总遍历文件: {total_files}")
+                if task.get("incremental_enabled", True):
+                    task_status[task_name] = {"state": "done", "message": f"增量同步完毕，扫描文件 {total_files} 个"}
+                    manager.add_log(task_name, f"✅ 增量同步完毕，OpenList 索引已对齐！本轮扫描文件: {total_files}")
+                else:
+                    task_status[task_name] = {"state": "done", "message": f"递归完毕，共刷新记录 {total_files} 个文件"}
+                    manager.add_log(task_name, f"✅ 目录强制更新完毕，且已触发原生引擎缓存对齐！总遍历文件: {total_files}")
                 
         except Exception as e:
             task_status[task_name] = {"state": "error", "message": f"异常: {str(e)}"}

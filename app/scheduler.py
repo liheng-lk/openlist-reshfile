@@ -5,6 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from .manager import manager
 from .crawler import recursive_scan_and_refresh
+from .incremental import remote_incremental_scan_and_refresh
 
 scheduler = AsyncIOScheduler()
 
@@ -34,21 +35,30 @@ async def run_index_update(task):
                 manager.add_log(task['name'], "登录失败: 未获取到 token")
                 return
             
-            manager.add_log(task['name'], "自动执行 - 已切回可视列表模式，启动深度递归！")
+            if task.get("incremental_enabled", True):
+                manager.add_log(task['name'], "自动执行 - 启动远端快照增量巡检！")
+            else:
+                manager.add_log(task['name'], "自动执行 - 已切回可视列表模式，启动深度递归！")
             headers = {"Authorization": token}
 
-            total_files, total_dirs = await recursive_scan_and_refresh(
-                client, server_url, token, task['mount_path'], manager, task['name']
-            )
+            if task.get("incremental_enabled", True):
+                total_files, total_dirs = await remote_incremental_scan_and_refresh(
+                    client, server_url, token, task, manager
+                )
+            else:
+                total_files, total_dirs = await recursive_scan_and_refresh(
+                    client, server_url, token, task['mount_path'], manager, task['name']
+                )
 
             # 下发增量更新指令给Bleve
-            await client.post(
-                f"{server_url}/api/admin/index/update",
-                params={"path": task['mount_path']},
-                headers=headers
-            )
+            if not task.get("incremental_enabled", True):
+                await client.post(
+                    f"{server_url}/api/admin/index/update",
+                    params={"path": task['mount_path']},
+                    headers=headers
+                )
             
-            manager.add_log(task['name'], f"自动执行 - 同步圆满结束！共计透视记录 {total_files} 个文件！")
+            manager.add_log(task['name'], f"自动执行 - 同步结束！本轮扫描记录 {total_files} 个文件。")
 
     except Exception as e:
         manager.add_log(task['name'], f"异常: {str(e)}")
