@@ -156,7 +156,8 @@ async def run_now(task_name: str, force_full: bool = False, auth=Depends(verify_
         server_url = config.get("server_url", "").rstrip('/')
         username, password = config.get("username"), config.get("password")
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            timeout = httpx.Timeout(300.0, connect=30.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 l_res = await client.post(f"{server_url}/api/auth/login", json={"username": username, "password": password})
                 token = l_res.json().get("data", {}).get("token")
                 if not token:

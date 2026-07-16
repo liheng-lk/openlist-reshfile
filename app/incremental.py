@@ -6,12 +6,17 @@ import posixpath
 from collections import deque
 from typing import Dict, Iterable, List, Set, Tuple
 
+import httpx
+
+from .crawler import get_semaphore
 from .manager import base_dir
 
 
 STATE_DIR = os.path.join(base_dir, "state")
 STATE_PATH = os.path.join(STATE_DIR, "remote_snapshots.json")
 MAX_INDEX_PATHS = 80
+REMOTE_RETRIES = 3
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 _state_lock = asyncio.Lock()
 _task_locks: Dict[str, asyncio.Lock] = {}
 
@@ -123,7 +128,7 @@ async def _remote_incremental_scan_and_refresh_locked(
 
     while queue:
         path = queue.popleft()
-        node = await _fetch_dir_node(client, server_url, token, path)
+        node = await _fetch_dir_node(client, server_url, token, path, manager, task_name)
         scanned_dirs += 1
         scanned_files += node["file_count"]
         scanned_nodes[path] = node
@@ -199,9 +204,13 @@ async def _remote_incremental_scan_and_refresh_locked(
     return known_files, scanned_dirs
 
 
-async def _fetch_dir_node(client, server_url: str, token: str, path: str) -> dict:
-    res = await client.post(
+async def _fetch_dir_node(client, server_url: str, token: str, path: str, manager, task_name: str) -> dict:
+    res = await _post_openlist(
+        client,
         f"{server_url}/api/fs/list",
+        manager,
+        task_name,
+        f"扫描 {path}",
         json={
             "path": path,
             "password": "",
@@ -248,8 +257,12 @@ async def _refresh_indexes(
     headers = {"Authorization": token}
     success = 0
     for path in paths:
-        res = await client.post(
+        res = await _post_openlist(
+            client,
             f"{server_url}/api/admin/index/update",
+            manager,
+            task_name,
+            f"刷新索引 {path}",
             params={"path": path},
             headers=headers,
         )
@@ -258,6 +271,34 @@ async def _refresh_indexes(
         else:
             manager.add_log(task_name, f"远端索引刷新失败: {path} -> HTTP {res.status_code}")
     return success
+
+
+async def _post_openlist(client, url: str, manager, task_name: str, action: str, **kwargs):
+    last_exc = None
+    for attempt in range(1, REMOTE_RETRIES + 1):
+        try:
+            async with get_semaphore():
+                res = await client.post(url, **kwargs)
+            if res.status_code not in RETRYABLE_STATUS_CODES or attempt == REMOTE_RETRIES:
+                return res
+            manager.add_log(
+                task_name,
+                f"{action} 返回 HTTP {res.status_code}，准备第 {attempt + 1}/{REMOTE_RETRIES} 次重试",
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            last_exc = exc
+            if attempt == REMOTE_RETRIES:
+                raise
+            manager.add_log(
+                task_name,
+                f"{action} 网络超时/中断: {type(exc).__name__}，准备第 {attempt + 1}/{REMOTE_RETRIES} 次重试",
+            )
+
+        await asyncio.sleep(2 * attempt)
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"{action} 失败")
 
 
 def _entry_snapshot(item: dict) -> dict:

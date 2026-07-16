@@ -13,6 +13,7 @@ def set_task_status_store(store):
     global task_status_store
     task_status_store = store
 
+
 async def run_index_update(task):
     config = manager.get_config()
     server_url = config.get("server_url").rstrip('/')
@@ -30,7 +31,8 @@ async def run_index_update(task):
         if task_status_store is not None:
             task_status_store[task_name] = {"state": "scanning", "message": "定时任务启动"}
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        timeout = httpx.Timeout(300.0, connect=30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             # 1. Login to get token
             login_res = await client.post(f"{server_url}/api/auth/login", json={
                 "username": username,
@@ -114,6 +116,3 @@ def reload_jobs():
             manager.add_log("系统", f"已排期任务 '{task['name']}'，Cron 表达式: '{task['cron']}'")
         except Exception as e:
             manager.add_log("系统", f"排期失败 '{task['name']}': {format_exception(e)}")
-
-# Initial load
-reload_jobs()
